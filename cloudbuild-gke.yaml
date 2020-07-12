@@ -1,0 +1,106 @@
+steps:
+# Build the container image
+- name: 'gcr.io/cloud-builders/docker'
+  id: Build deploy image
+  args: ['build', '-t', 'gcr.io/$PROJECT_ID/$_APPLICATION_NAME-$_APPLICATION_NAMESPACE:$SHORT_SHA', '.']
+  env:
+  - '_APPLICATION_NAME=_APPLICATION_NAME'
+  - '_APPLICATION_NAMESPACE=_APPLICATION_NAMESPACE'
+  - 'PROJECT_ID=${PROJECT_ID}'
+
+# Push the container image to Container Registry
+- name: 'gcr.io/cloud-builders/docker'
+  id: Push Image to GCR
+  args: ['push', 'gcr.io/$PROJECT_ID/$_APPLICATION_NAME-$_APPLICATION_NAMESPACE:$SHORT_SHA']
+  env:
+  - '_APPLICATION_NAME=_APPLICATION_NAME'
+  - '_APPLICATION_NAMESPACE=_APPLICATION_NAMESPACE'
+  - 'PROJECT_ID=${PROJECT_ID}'
+
+# This step generates the new manifest
+- name: 'docker.io/yagami22/terraform-gcloud-kubectl-slim'
+  id: Generate manifest for deployment
+  entrypoint: /bin/bash
+  args:
+  - '-c'
+  - |
+
+    git clone -b develop https://github.com/Darius-Ndubi/simple-gke.git
+    cd simple-gke
+    # Generate deployment yaml
+    envsubst < ./deployment-files/deployment.yaml.tpl > deployment.yaml
+    envsubst < ./deployment-files/service.yaml.tpl > service.yaml
+    envsubst < ./deployment-files/autoscaler.yaml.tpl > autoscaler.yaml
+    envsubst < ./deployment-files/cert-config/cert-issuer.yaml.tpl > cert-issuer.yaml
+    envsubst < ./deployment-files/ingres-config.yaml.tpl > ingress-config.yaml
+    echo "-----------Files generated --------------"
+    ls
+  env:
+  - '_APPLICATION_NAME=${_APPLICATION_NAME}'
+  - '_APPLICATION_NAMESPACE=${_APPLICATION_NAMESPACE}'
+  - '_MIN_PODS=${_MIN_PODS}'
+  - '_GOOGLE_CLOUD_PROJECT=${_GOOGLE_CLOUD_PROJECT}'
+  - '_MAX_CPU=${_MAX_CPU}'
+  - '_MAX_MEM=${_MAX_MEM}'
+  - '_TARGET_PORT=${_TARGET_PORT}'
+  - '_MAX_PODS=${_MAX_PODS}'
+  - '_HOST_DOMAIN_WEB=${_HOST_DOMAIN_WEB}'
+  - '_HOST_DOMAIN_API=${_HOST_DOMAIN_API}'
+  - '_APPLICATION_NAME_WEB=${_APPLICATION_NAME_WEB}'
+  - '_APPLICATION_NAME_API=${_APPLICATION_NAME_API}'
+  - '_DEFAULT_NOTIFY=${_DEFAULT_NOTIFY}'
+  - '_DNS_SRV_NAME=${_DNS_SRV_NAME}'
+  - 'SHORT_SHA=${SHORT_SHA}'
+
+# This step deploys appliction from the manifest above.
+- name: 'docker.io/yagami22/terraform-gcloud-kubectl-slim'
+  id: Deploy application
+  entrypoint: /bin/bash
+  args:
+  - '-c'
+  - |
+
+    cd simple-gke/
+    # Export service account credentials for auth
+    # Authenticate to gcloud with the services account
+    # use terraform to apply infrastructure
+    echo $_SERVICE_ACCOUNT_BASE64 | base64 -d > account.json
+    gcloud auth activate-service-account --key-file=account.json
+    export GOOGLE_APPLICATION_CREDENTIALS=account.json
+    gcloud container clusters get-credentials $_CLUSTER_NAME --zone $_LOCATION --project $PROJECT_ID
+    kubectl get nodes
+    # Apply ingress controller
+    kubectl create clusterrolebinding cluster-admin-binding \
+        --clusterrole=cluster-admin \
+        --user=$(gcloud config get-value core/account) || echo "user cluster-admin exists"
+
+    kubectl apply -f \
+      https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v0.34.0/deploy/static/provider/cloud/deploy.yaml
+
+    # Apply cert-manager addon
+    kubectl apply \
+      --validate=false -f \
+      https://github.com/jetstack/cert-manager/releases/download/v0.15.1/cert-manager-legacy.yaml
+    sleep 30
+
+    echo $_DNS_SERVICE_ACCOUNT | base64 -d > key.json
+
+    echo "+++++++++++++ APPLY CHANGES ++++++++++++++++++"
+    # Apply deploy files generated in previous stage
+    kubectl create namespace $_APPLICATION_NAMESPACE || echo "namespace exists"
+    # Create dns secret
+    kubectl create secret generic $_DNS_SRV_NAME --from-file=key.json -n $_APPLICATION_NAMESPACE || echo "secret exist"
+    kubectl apply -f service.yaml
+    kubectl apply -f autoscaler.yaml
+    kubectl apply -f deployment.yaml
+    kubectl apply -f cert-issuer.yaml
+    kubectl apply -f ingress-config.yaml
+
+  env:
+  - '_SERVICE_ACCOUNT_BASE64=${_SERVICE_ACCOUNT_BASE64}'
+  - '_CLUSTER_NAME=${_CLUSTER_NAME}'
+  - 'PROJECT_ID=${PROJECT_ID}'
+  - '_LOCATION=${_LOCATION}'
+  - '_APPLICATION_NAMESPACE=${_APPLICATION_NAMESPACE}'
+  - '_DNS_SRV_NAME=${_DNS_SRV_NAME}'
+  - '_DNS_SERVICE_ACCOUNT=${_DNS_SERVICE_ACCOUNT}'
