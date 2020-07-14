@@ -24,7 +24,6 @@ class FirebaseDB:
 
     def edit_todo(self, name, data):
         """method to update todo status"""
-        db_path = self.db_path + "/" + name
         update_todo = self.firebase_connect.put(
             self.db_path + "/" + name,
             "done",

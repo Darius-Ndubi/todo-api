@@ -21,6 +21,7 @@ todo = api.model(
         "done": fields.Boolean(default=False, description="status of the todo")
     }
 )
+
 todo_status = api.model(
     "TodoStatus",
     {
